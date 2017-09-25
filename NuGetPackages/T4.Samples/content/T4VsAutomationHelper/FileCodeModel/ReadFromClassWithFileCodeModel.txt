@@ -1,7 +1,0 @@
-﻿ 
-
-CREATE TABLE UseClassForGeneration (
-  Property nvarchar(75),
-  Length int,
-)
-

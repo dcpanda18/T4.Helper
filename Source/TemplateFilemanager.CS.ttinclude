@@ -232,6 +232,7 @@ public class TemplateFileManager
         currentBlock = null;
     }
 
+        private Dictionary<string, string> _cachedOutputPath=new Dictionary<string,string>();
     /// <summary>
     /// Produce the template output files.
     /// </summary>
@@ -247,9 +248,24 @@ public class TemplateFileManager
             var footerText = _generationEnvironment.ToString(footer.Start, footer.Length);
             files.Reverse();
 
+            
+
             foreach (var block in files)
             {
-				var outputPath = VSHelper.GetOutputPath(dte, block, Path.GetDirectoryName(_textTransformation.Host.TemplateFile));
+                    var outputPath=string.Empty;
+                if (String.IsNullOrEmpty(block.ProjectName) == true && String.IsNullOrEmpty(block.FolderName) == true)
+		        {
+                        outputPath=Path.GetDirectoryName(_textTransformation.Host.TemplateFile);
+                } else
+                {
+                        var outputkey=block.ProjectName + '_'+block.FolderName;
+                    if(!_cachedOutputPath.ContainsKey(outputkey))
+                        {
+                            _cachedOutputPath[outputkey]=VSHelper.GetOutputPath(dte, block, Path.GetDirectoryName(_textTransformation.Host.TemplateFile));
+                        } 
+                    outputPath=_cachedOutputPath[outputkey];
+                }
+	            //var outputPath = VSHelper.GetOutputPath(dte, block, Path.GetDirectoryName(_textTransformation.Host.TemplateFile));
                 var fileName = Path.Combine(outputPath, block.Name);
                 var content = this.ReplaceParameter(headerText, block) +
 				_generationEnvironment.ToString(block.Start, block.Length) +
@@ -461,15 +477,21 @@ public class TemplateFileManager
 								};
 
 		this.templatePlaceholderList.Clear();
-
+        Dictionary<string,ProjectItem> cachedProjectItems=new Dictionary<string,ProjectItem>();
 		foreach (var item in groupedFileNames)
-		{
-			EnvDTE.ProjectItem pi = VSHelper.GetTemplateProjectItem(templateProjectItem.DTE, item.FirstItem, templateProjectItem);
-			ProjectSyncPart(pi, item.OutputFiles);
+            {
+                var envitem=item.FirstItem;
+                string key=(string.IsNullOrEmpty(envitem.ProjectName)? "" : envitem.ProjectName) + "__"
+                    + (string.IsNullOrEmpty(envitem.FolderName)? "" : envitem.FolderName); 
+                if(!cachedProjectItems.ContainsKey(key)){
+                    cachedProjectItems.Add(key,VSHelper.GetTemplateProjectItem(templateProjectItem.DTE, item.FirstItem, templateProjectItem));
+                }
+                EnvDTE.ProjectItem pi=cachedProjectItems[key];
+                ProjectSyncPart(pi, item.OutputFiles);
 
-			if (pi.Name.EndsWith("txt4"))
-				this.templatePlaceholderList.Add(VSHelper.GetProjectItemFullPath(pi));
-		}
+                if (pi.Name.EndsWith("txt4"))
+                    this.templatePlaceholderList.Add(VSHelper.GetProjectItemFullPath(pi));
+            }
 
 		// clean up
 		bool hasDefaultItems = groupedFileNames.Where(f => String.IsNullOrEmpty(f.ProjectName) && String.IsNullOrEmpty(f.FolderName)).Count() > 0;
@@ -482,29 +504,28 @@ public class TemplateFileManager
     private static void ProjectSyncPart(EnvDTE.ProjectItem templateProjectItem, IEnumerable<OutputFile> keepFileNames)
     {
         var keepFileNameSet = new HashSet<OutputFile>(keepFileNames);
-        var projectFiles = new Dictionary<string, EnvDTE.ProjectItem>();
+        var projectFiles = new HashSet<string>();
         var originalOutput = Path.GetFileNameWithoutExtension(templateProjectItem.FileNames[0]);
 
         foreach (EnvDTE.ProjectItem projectItem in templateProjectItem.ProjectItems)
-        {
-            projectFiles.Add(projectItem.FileNames[0], projectItem);
-        }
-
-        // Remove unused items from the project
-        foreach (var pair in projectFiles)
-        {
-			bool isNotFound = keepFileNames.Where(f=>f.FileName == pair.Key).Count() == 0;
-            if (isNotFound == true
-                && !(Path.GetFileNameWithoutExtension(pair.Key) + ".").StartsWith(originalOutput + "."))
             {
-                pair.Value.Delete();
+                string pairkey=projectItem.FileNames[0];
+                var currentFileName=keepFileNames.FirstOrDefault(f=>f.FileName == pairkey);
+                var addFile=true;
+                if (currentFileName == null
+                    && !(Path.GetFileNameWithoutExtension(pairkey) + ".").StartsWith(originalOutput + "."))
+                {
+                    addFile=false;
+                }
+                if(addFile){
+                    projectFiles.Add(pairkey);
+                }
             }
-        }
 
         // Add missing files to the project
         foreach (var fileName in keepFileNameSet)
         {
-            if (!projectFiles.ContainsKey(fileName.FileName))
+            if (!projectFiles.Contains(fileName.FileName))
             {
                 templateProjectItem.ProjectItems.AddFromFile(fileName.FileName);
             }
@@ -992,7 +1013,8 @@ public class VSHelper
 		}
 		else if (prj != null && String.IsNullOrEmpty(file.FolderName) == false)
 		{
-			item = GetAllProjectItemsRecursive(prj.ProjectItems).Where(i=>i.Name == file.FolderName).First();
+			
+            item = FindFolderByName(prj.ProjectItems, file.FolderName);
 		}
 		else if (String.IsNullOrEmpty(file.FolderName) == false)
 		{
@@ -1025,30 +1047,37 @@ public class VSHelper
 	{
 		return GetAllProjects(dte).Where(p=>p.Name == projectName).First();
 	}
+        private static Dictionary<string,IEnumerable<EnvDTE.ProjectItem>> AllSolutionItems=new Dictionary<string, IEnumerable<EnvDTE.ProjectItem>>();
+        private static Dictionary<string,IEnumerable<EnvDTE.Project>> AllProjectItems=new Dictionary<string, IEnumerable<EnvDTE.Project>>();
 
 	public static IEnumerable<EnvDTE.Project> GetAllProjects(EnvDTE.DTE dte)
 	{
-		List<EnvDTE.Project> projectList = new List<EnvDTE.Project>();
+		if(!AllProjectItems.ContainsKey(dte.Name))
+        {
+            List<EnvDTE.Project> projectList = new List<EnvDTE.Project>();
 
-		var folders = dte.Solution.Projects.Cast<EnvDTE.Project>().Where(p=>p.Kind == EnvDTE80.ProjectKinds.vsProjectKindSolutionFolder);
+		    var folders = dte.Solution.Projects.Cast<EnvDTE.Project>().Where(p=>p.Kind == EnvDTE80.ProjectKinds.vsProjectKindSolutionFolder);
 
-		foreach (EnvDTE.Project folder in folders)
-		{
-			if (folder.ProjectItems == null) continue;
+		    foreach (EnvDTE.Project folder in folders)
+		    {
+			    if (folder.ProjectItems == null) continue;
 
-			foreach (EnvDTE.ProjectItem item in folder.ProjectItems)
-			{
-				if (item.Object is EnvDTE.Project)
-					projectList.Add(item.Object as EnvDTE.Project);
-			}
-		}
+			    foreach (EnvDTE.ProjectItem item in folder.ProjectItems)
+			    {
+				    if (item.Object is EnvDTE.Project)
+					    projectList.Add(item.Object as EnvDTE.Project);
+			    }
+		    }
 
-		var projects = dte.Solution.Projects.Cast<EnvDTE.Project>().Where(p=>p.Kind != EnvDTE80.ProjectKinds.vsProjectKindSolutionFolder);
+		    var projects = dte.Solution.Projects.Cast<EnvDTE.Project>().Where(p=>p.Kind != EnvDTE80.ProjectKinds.vsProjectKindSolutionFolder);
 
-		if (projects.Count() > 0)
-			projectList.AddRange(projects);
-
-		return projectList;
+		    if (projects.Count() > 0)
+			    projectList.AddRange(projects);
+                
+            AllProjectItems.Add(dte.Name,projectList);
+        }
+        
+		return AllProjectItems[dte.Name];
 	}
 
 	public static EnvDTE.ProjectItem GetProjectItemWithName(EnvDTE.ProjectItems items, string itemName)
@@ -1069,18 +1098,24 @@ public class VSHelper
 		return item.Properties.Item("FullPath").Value.ToString();
 	}
 
+        
+        
+
 	public static IEnumerable<EnvDTE.ProjectItem> GetAllSolutionItems(EnvDTE.DTE dte)
 	{
-		List<EnvDTE.ProjectItem> itemList = new List<EnvDTE.ProjectItem>();
+		if(!AllSolutionItems.ContainsKey(dte.Name))
+            {
+                List<EnvDTE.ProjectItem> itemList = new List<EnvDTE.ProjectItem>();
 
-		foreach (Project item in GetAllProjects(dte))
-		{
-			if (item == null || item.ProjectItems == null) continue;
+		        foreach (Project item in GetAllProjects(dte))
+		        {
+			        if (item == null || item.ProjectItems == null) continue;
 
-			itemList.AddRange(GetAllProjectItemsRecursive(item.ProjectItems));
-		}
-
-		return itemList;
+			        itemList.AddRange(GetAllProjectItemsRecursive(item.ProjectItems));
+		        }
+                AllSolutionItems.Add(dte.Name,itemList);
+            }
+		return AllSolutionItems[dte.Name];
 	}
 
 	public static IEnumerable<EnvDTE.ProjectItem> GetAllProjectItemsRecursive(EnvDTE.ProjectItems projectItems)
